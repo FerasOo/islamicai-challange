@@ -50,12 +50,21 @@ The ZIP should contain a top-level `retrieval/` folder. Unzip it from the projec
 unzip daleel-retrieval.zip -d .
 ```
 
-After extraction, check that these paths exist:
+After extraction, the directory structure should look like this:
 
 ```text
-retrieval/models/jina-v5-small-retrieval/
-retrieval/processed/corpus.sqlite
-retrieval/lancedb/arabic_evidence.lance/
+./
+├── app/
+├── retrieval/
+│   ├── lancedb/
+│   │   └── arabic_evidence.lance/
+│   ├── models/
+│   │   └── jina-v5-small-retrieval/
+│   ├── processed/
+│   │   └── corpus.sqlite
+│   ├── scripts/
+│   └── search-config.json
+└── README.md
 ```
 
 Keep the `retrieval/` directory structure shown above; the backend loads files from those exact paths.
