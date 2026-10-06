@@ -18,7 +18,7 @@ STT_MODEL = os.getenv('DALEEL_STT_MODEL', 'google/gemini-3.5-transcribe')
 JEV_MODEL = os.getenv('DALEEL_JEV_MODEL', 'typesafe/jev-1.13')
 CANDIDATE_LIMIT = 200
 # Calibrated against the frozen hard-question benchmark; cosine, not confidence.
-RETRIEVAL_MINIMUM = .50
+RETRIEVAL_MINIMUM = .25
 JEV_ACCEPTANCE = .75
 TRIGGER_MINIMUM = .50
 VOICE_MATCH = float(os.getenv('DALEEL_VOICE_MATCH', '.55'))

@@ -1,5 +1,5 @@
 import {useEffect,useRef,useState} from 'react';
-import {BookOpen,Bookmark,Check,ChevronDown,ChevronLeft,Clock,Copy,Download,FileText,Headphones,History,Library,LoaderCircle,Mic,MoreHorizontal,Plus,Search,Send,Settings2,ShieldCheck,Sparkles,Square,Trash2,UserRound,Users,Volume2,X,ArrowUpRight,Radio,PenLine} from 'lucide-react';
+import {BookOpen,Bookmark,Check,ChevronDown,ChevronLeft,Clock,Copy,Download,FileText,Headphones,Highlighter,History,Library,LoaderCircle,Mic,MoreHorizontal,Pin,Plus,Search,Send,Settings2,ShieldCheck,Sparkles,Square,Trash2,UserRound,Users,Volume2,X,ArrowUpRight,Radio,PenLine} from 'lucide-react';
 import {AudioCapture} from './audio';
 import {orderedEvidence} from './evidence';
 import {sessionSnapshot} from './history';
@@ -9,6 +9,37 @@ const number=(n:number)=>new Intl.NumberFormat('ar-SA').format(n);
 const time=(n?:number)=>n===undefined?'—':n<1000?`${number(Math.round(n))} مللي ثانية`:`${number(Math.round(n/100)/10)} ثانية`;
 const sourceGroups=[{id:'quran',name:'القرآن',icon:BookOpen,sources:['quran','tafsir-mujahid']},{id:'hadith',name:'السنة',icon:FileText,sources:['bukhari','muslim','hadeethenc']},{id:'fatwa',name:'الفتاوى',icon:FileText,sources:['ibn-baz','ibn-uthaymeen']},{id:'books',name:'الكتب',icon:Library,sources:['kuwait-fiqh']},{id:'terminology',name:'المصطلحات',icon:BookOpen,sources:['terminology']}];
 const evidenceCount=(hits:Hit[],sources:string[])=>orderedEvidence(hits.filter(h=>h.status==='accepted'&&sources.includes(h.source))).length;
+function findHighlightRange(parentText:string,hit?:Hit):[number,number]|null{
+ if(!hit)return null;
+ if(typeof hit.start_char==='number'&&typeof hit.end_char==='number'&&hit.end_char>hit.start_char&&hit.end_char<=parentText.length){
+  const slice=parentText.slice(hit.start_char,hit.end_char);
+  if(slice===hit.text||slice.trim()===hit.text.trim())return [hit.start_char,hit.end_char];
+ }
+ if(hit.text){
+  const raw=hit.text;
+  const directIdx=parentText.indexOf(raw);
+  if(directIdx!==-1)return [directIdx,directIdx+raw.length];
+  const trimmed=raw.trim();
+  if(trimmed){
+   const trimmedIdx=parentText.indexOf(trimmed);
+   if(trimmedIdx!==-1)return [trimmedIdx,trimmedIdx+trimmed.length];
+   try{
+    const escaped=trimmed.replace(/[.*+?^${}()|[\]\\]/g,'\\$&').replace(/\s+/g,'\\s+');
+    const match=new RegExp(escaped,'u').exec(parentText);
+    if(match)return [match.index,match.index+match[0].length];
+   }catch{}
+   const prefix=trimmed.slice(0,40).trim();
+   if(prefix.length>=10){
+    const pIdx=parentText.indexOf(prefix);
+    if(pIdx!==-1)return [pIdx,Math.min(parentText.length,pIdx+trimmed.length)];
+   }
+  }
+ }
+ return null;
+}
+function highlightSlice(text:string,range:[number,number],ref:React.RefObject<HTMLElement|null>){
+ return <>{text.slice(0,range[0])}<mark className="context-highlight" ref={ref}>{text.slice(range[0],range[1])}</mark>{text.slice(range[1])}</>;
+}
 async function api<T>(path:string,options?:RequestInit):Promise<T>{
  const response=await fetch('/api'+path,{...options,headers:{'Content-Type':'application/json',...options?.headers}});
  if(!response.ok){let message='تعذر إكمال الطلب.';try{const data=await response.json();if(typeof data.detail==='string')message=data.detail;}catch{}throw new Error(message);}
@@ -18,6 +49,7 @@ async function api<T>(path:string,options?:RequestInit):Promise<T>{
 function App(){
  const [health,setHealth]=useState<Health>();const [sessions,setSessions]=useState<Session[]>([]);const [sid,setSid]=useState('');
  const [connected,setConnected]=useState(false);const [turns,setTurns]=useState<Turn[]>([]);const [runs,setRuns]=useState<Record<string,Run>>({});const [runOrder,setRunOrder]=useState<string[]>([]);const [selected,setSelected]=useState('');
+ const [evidencePinned,setEvidencePinned]=useState(false);
  const [saved,setSaved]=useState<Set<string>>(new Set());const [savedHits,setSavedHits]=useState<Hit[]>([]);const [enrolled,setEnrolled]=useState(false);
  const [view,setView]=useState<'live'|'history'|'library'|'saved'>('live');const [settingsOpen,setSettingsOpen]=useState(false);const [voiceOpen,setVoiceOpen]=useState(false);
  const auto=true;const [mode,setMode]=useState<'all'|'enrolled'>('all');const [sourceGroup,setSourceGroup]=useState('quran');const k=health?.retrieval_policy.candidate_limit??200;
@@ -36,14 +68,15 @@ function App(){
  const [copyId,setCopyId]=useState('');const [sessionBusy,setSessionBusy]=useState(false);
  const profilesRef=useRef<VoiceProfile[]>([]);profilesRef.current=profiles;
  const pendingVoiceProfile=useRef('');
- const ws=useRef<WebSocket|undefined>(undefined);const capture=useRef<AudioCapture|undefined>(undefined);const enrollmentTimer=useRef<ReturnType<typeof setInterval>|undefined>(undefined);const toastTimer=useRef<ReturnType<typeof setTimeout>|undefined>(undefined);const transcriptEnd=useRef<HTMLDivElement>(null);
+ const ws=useRef<WebSocket|undefined>(undefined);const capture=useRef<AudioCapture|undefined>(undefined);const enrollmentTimer=useRef<ReturnType<typeof setInterval>|undefined>(undefined);const toastTimer=useRef<ReturnType<typeof setTimeout>|undefined>(undefined);const transcriptEnd=useRef<HTMLDivElement>(null);const highlightRef=useRef<HTMLElement>(null);
  const settings=useRef({auto,mode,sources:[] as string[],clip_seconds:clipSeconds});
  settings.current={auto,mode,sources:[],clip_seconds:clipSeconds};
  const notify=(text:string)=>{setNotice(text);clearTimeout(toastTimer.current);toastTimer.current=setTimeout(()=>setNotice(''),6500);};
  const send=(data:unknown)=>{if(ws.current?.readyState===WebSocket.OPEN)ws.current.send(JSON.stringify(data));else notify('الجلسة غير متصلة. انتظر إعادة الاتصال.');};
 
  function applyEvent(e:any,restoring=false){
-  if(e.type==='connected'){setEnrolled(e.enrolled);if(!e.enrolled)setMode('all');const last=localStorage.getItem('daleel-profile');const preferred=e.voice_profile?.has_voice?e.voice_profile.id:profilesRef.current.some(p=>p.id===last&&p.has_voice)?last:undefined;if(e.voice_profile?.has_voice)setProfileId(e.voice_profile.id);else if(preferred)send({type:'select_profile',profile_id:preferred});else setProfileId('');}
+  if(e.type==='connected'){setEnrolled(e.enrolled);setEvidencePinned(!!e.evidence_pinned);if(!e.enrolled)setMode('all');const last=localStorage.getItem('daleel-profile');const preferred=e.voice_profile?.has_voice?e.voice_profile.id:profilesRef.current.some(p=>p.id===last&&p.has_voice)?last:undefined;if(e.voice_profile?.has_voice)setProfileId(e.voice_profile.id);else if(preferred)send({type:'select_profile',profile_id:preferred});else setProfileId('');}
+  if(e.type==='evidence_pin')setEvidencePinned(!!e.pinned);
   if(e.type==='profile_selected'){setProfileId(e.profile.id);localStorage.setItem('daleel-profile',e.profile.id);setEnrolled(e.enrolled);setSpeakerState(undefined);if(!e.enrolled)setMode('all');if(pendingVoiceProfile.current===e.profile.id){pendingVoiceProfile.current='';setVoiceApplying(false);if(e.enrolled){setMode('enrolled');setVoiceOpen(false);}else notify('هذا الصوت لا يحتوي على تسجيل صالح. سجّل عينة جديدة.');}void loadProfiles();}
   if(e.type==='transcript_partial'&&!restoring)setPartialTranscript(e.text);
   if(e.type==='speaker_state'&&!restoring)setSpeakerState(e);
@@ -86,7 +119,7 @@ function App(){
  async function newSession(){setSessionBusy(true);try{clearInterval(enrollmentTimer.current);await capture.current?.stop();setRecording(false);setEnrolling(false);const session=await api<Session>('/sessions',{method:'POST'});setSid(session.id);localStorage.setItem('daleel-session',session.id);await loadSessions();setView('live');}catch(e){notify((e as Error).message);}finally{setSessionBusy(false);}}
  useEffect(()=>{let alive=true;(async()=>{try{const h=await api<Health>('/health');if(!alive)return;setHealth(h);await loadProfiles();await loadSaved();const list=await loadSessions();if(!alive)return;const last=localStorage.getItem('daleel-session');if(last&&list.some(s=>s.id===last))setSid(last);else{const s=await api<Session>('/sessions',{method:'POST'});if(alive){setSid(s.id);localStorage.setItem('daleel-session',s.id);await loadSessions();}}}catch(e){if(alive)notify((e as Error).message);}})();return()=>{alive=false;};},[]);
  useEffect(()=>{if(!sid)return;let disposed=false;let retry:ReturnType<typeof setTimeout>;let socket:WebSocket;let attempts=0;
-  setTurns([]);setRuns({});setRunOrder([]);setSelected('');setConnected(false);setRecording(false);setEnrolling(false);setAudioState('stopped');setSpeakerState(undefined);setPartialTranscript('');setAudioReport(undefined);localStorage.setItem('daleel-session',sid);
+  setTurns([]);setRuns({});setRunOrder([]);setSelected('');setEvidencePinned(false);setConnected(false);setRecording(false);setEnrolling(false);setAudioState('stopped');setSpeakerState(undefined);setPartialTranscript('');setAudioReport(undefined);localStorage.setItem('daleel-session',sid);
   async function connect(){try{const detail=await api<{events:any[];bookmarks:Hit[];enrolled:boolean}>(`/sessions/${sid}`);if(disposed)return;setTurns([]);setRuns({});setRunOrder([]);detail.events.forEach(e=>applyEvent(e,true));setRuns(old=>Object.fromEntries(Object.entries(old).map(([id,r])=>[id,{...r,done:true}])));setEnrolled(detail.enrolled);void loadSaved();
    socket=new WebSocket(`${location.protocol==='https:'?'wss:':'ws:'}//${location.host}/api/live/${sid}`);ws.current=socket;
    socket.onopen=()=>{if(disposed){socket.close();return;}attempts=0;setConnected(true);socket.send(JSON.stringify({type:'settings',...settings.current,mode:detail.enrolled?settings.current.mode:'all'}));};
@@ -98,6 +131,12 @@ function App(){
  },[sid]);
  useEffect(()=>{if(connected)send({type:'settings',...settings.current});},[auto,mode,connected,clipSeconds]);
  useEffect(()=>{transcriptEnd.current?.scrollIntoView({behavior:'smooth',block:'nearest'});},[turns.length,partialTranscript]);
+ useEffect(()=>{
+  if(context&&contextMain&&highlightRef.current){
+   const t=setTimeout(()=>{highlightRef.current?.scrollIntoView({behavior:'smooth',block:'center'});},150);
+   return ()=>clearTimeout(t);
+  }
+ },[context,contextMain]);
  useEffect(()=>()=>{clearTimeout(toastTimer.current);clearInterval(enrollmentTimer.current);},[]);
 
  useEffect(()=>{
@@ -112,6 +151,7 @@ function App(){
   };document.addEventListener('keydown',key);return()=>{document.removeEventListener('keydown',key);previous?.focus();};
  },[settingsOpen,voiceOpen,!!contextMain,deleteTarget,!!historyDetail]);
  const run=runs[selected];const busy=!!run&&!run.done;
+ const hasEvidence=runOrder.some(id=>runs[id]?.hits.some(hit=>hit.status==='accepted'));
  const retrieving=busy&&!run?.timing;const searchProgress=run?.total?Math.min(100,100*run.checked/run.total):0;
  const rawHits=view==='saved'?savedHits.map(h=>({...h,source_name:health?.sources[h.source]||h.source_name,status:'accepted' as const,reference:h.reference||'موضع محفوظ في المصدر',similarity:h.similarity||0})):run?.hits||[];
  const visibleSources=sourceGroups.find(g=>g.id===sourceGroup)?.sources||[];
@@ -161,10 +201,10 @@ function App(){
    <div className={`stage ${view==='saved'?'saved-view':''}`}>
     {view==='live'&&<section className="conversation panel"><div className="panel-heading"><div className="heading-label"><span className="status-dot"/><h2>الحوار</h2></div></div>
      <div className="audio-strip"><button className={`microphone ${recording?'recording':''}`} onClick={()=>void microphone()} disabled={!connected||enrolling||health?.stt_configured===false} aria-label={recording?'إيقاف الميكروفون':'تشغيل الميكروفون'}>{recording?<Square size={20} fill="currentColor"/>:<Mic size={23}/>}</button><div className="audio-info"><b>{statusLabel}</b><span>{liveStt?`${mode==='all'?'الجميع':'صوتي فقط'} · ${recording&&speakerState?speakerState.label:'مباشر'}`:`${mode==='all'?'الجميع':'صوتي فقط'} · ${number(clipSeconds)} ث${audioReport?` · استجابة ${time(audioReport.stt_ms)}`:''}`}</span></div><div className={`waveform ${recording?'live':''}`} aria-hidden="true">{Array.from({length:27},(_,i)=><i key={i} style={{height:`${6+(recording?level:0)*42*(.4+Math.sin(i*1.7)**2)}px`,animationDelay:`${i*25}ms`}}/>)}</div><button className="audio-options" disabled={!recording} title="إرسال المقطع الآن" aria-label="إرسال المقطع الآن" onClick={()=>send({type:'audio_flush'})}><Send size={16}/></button><button className="audio-options" aria-label="إعداد الصوت" onClick={openVoiceSettings}><Settings2 size={17}/></button></div>
-     <div className="transcript">{turns.length===0&&!partialTranscript?<div className="conversation-empty"><button className="empty-orbit" type="button" onClick={()=>void microphone()} disabled={!connected||enrolling||health?.stt_configured===false} aria-label="تشغيل الميكروفون"><Mic size={28}/></button><h3>ابدأ الحديث</h3><p>اضغط الميكروفون لبدء الحوار.</p></div>:turns.map(t=><article className={`turn ${t.speaker==='enrolled'?'specialist':''}`} key={t.id}><div className="speaker-avatar"><UserRound size={15}/></div><div className="turn-content"><div className="turn-heading"><b>{t.label}</b><span>{t.input==='microphone'?'صوت':'نص'}</span></div><p>{t.text}</p><div className="turn-actions"><button onClick={()=>send({type:'search',text:t.text})}><Search size={12}/> بحث</button>{t.excluded_from_filter&&<span className="voice-uncertain">بانتظار تأكيد الصوت</span>}{t.trigger!==undefined&&<span className={t.trigger?'triggered':''}>{t.trigger?'بدأ البحث':'لا بحث جديد'}</span>}</div></div></article>)}{partialTranscript&&<article className="turn interim-turn"><div className="speaker-avatar"><Mic size={15}/></div><div className="turn-content"><div className="turn-heading"><b>تفريغ مباشر</b><span>جارٍ الاستماع</span></div><p>{partialTranscript}</p></div></article>}<div ref={transcriptEnd}/></div>
+     <div className="transcript">{turns.length===0&&!partialTranscript?<div className="conversation-empty"><button className="empty-orbit" type="button" onClick={()=>void microphone()} disabled={!connected||enrolling||health?.stt_configured===false} aria-label="تشغيل الميكروفون"><Mic size={28}/></button><h3>ابدأ الحديث</h3><p>اضغط الميكروفون لبدء الحوار.</p></div>:turns.map(t=><article className={`turn ${t.speaker==='enrolled'?'specialist':''}`} key={t.id}><div className="speaker-avatar"><UserRound size={15}/></div><div className="turn-content"><div className="turn-heading"><b>{t.label}</b><span>{t.input==='microphone'?'صوت':'نص'}</span></div><p>{t.text}</p><div className="turn-actions"><button onClick={()=>send({type:'search',text:t.text,turn_id:t.id})}><Search size={12}/> بحث</button>{t.excluded_from_filter&&<span className="voice-uncertain">بانتظار تأكيد الصوت</span>}{t.trigger!==undefined&&<span className={t.trigger?'triggered':''}>{t.trigger?'بدأ البحث':'لا بحث جديد'}</span>}</div></div></article>)}{partialTranscript&&<article className="turn interim-turn"><div className="speaker-avatar"><Mic size={15}/></div><div className="turn-content"><div className="turn-heading"><b>تفريغ مباشر</b><span>جارٍ الاستماع</span></div><p>{partialTranscript}</p></div></article>}<div ref={transcriptEnd}/></div>
 
     </section>}
-    <section className="evidence panel"><div className="panel-heading"><div className="heading-label"><BookOpen size={18}/><h2>{view==='saved'?'المحفوظات':'الأدلة'}</h2><span className="count-badge">{number(cards.length)}</span></div><button className="icon-button" aria-label="ضبط البحث" onClick={()=>setSettingsOpen(true)}><Settings2 size={17}/></button></div>
+    <section className="evidence panel"><div className="panel-heading"><div className="heading-label"><BookOpen size={18}/><h2>{view==='saved'?'المحفوظات':'الأدلة'}</h2><span className="count-badge">{number(cards.length)}</span></div><div className="evidence-heading-actions">{view==='live'&&(hasEvidence||evidencePinned)&&<button className={`evidence-pin ${evidencePinned?'active':''}`} aria-pressed={evidencePinned} title={evidencePinned?'إعادة تشغيل البحث التلقائي':'إيقاف البحث التلقائي مع إبقاء الأدلة الحالية'} disabled={!connected} onClick={()=>send({type:'evidence_pin',pinned:!evidencePinned})}><Pin size={14} fill={evidencePinned?'currentColor':'none'}/>{evidencePinned?'إلغاء التثبيت':'تثبيت الأدلة'}</button>}<button className="icon-button" aria-label="ضبط البحث" onClick={()=>setSettingsOpen(true)}><Settings2 size={17}/></button></div></div>
      {view!=='saved'&&<div className="source-tabs">{sourceGroups.map(g=><button key={g.id} className={sourceGroup===g.id?'active':''} aria-pressed={sourceGroup===g.id} onClick={()=>setSourceGroup(g.id)}><g.icon size={13}/>{g.name}<span className="source-count">{number(evidenceCount(run?.hits||[],g.sources))}</span></button>)}</div>}
      {run&&view!=='saved'&&<div className="query-strip"><div><Search size={14}/><p>{run.query}</p></div><span>{busy?<><LoaderCircle size={12} className="spin"/> {retrieving?'إحضار النصوص…':`فحص ${number(run.checked)} / ${number(run.total)}`}</>:<>{run.error_message||run.cancelled?<X size={12}/>:<Check size={12}/>} {run.error_message?'تعذر البحث':run.cancelled?'توقف البحث':`اكتمل البحث · مرشحات ${number(run.hits.length)} / ${number(run.k)}`}</>}</span>{busy&&<button aria-label="إيقاف البحث" onClick={()=>send({type:'cancel'})}><X size={13}/></button>}</div>}
      <div className="evidence-scroll">{busy&&view!=='saved'&&<div className="search-progress" role="status" aria-live="polite"><div><span className="search-pulse"/><b>{retrieving?'إحضار الأدلة':'التحقق من الصلة'}</b><span>{!retrieving&&`${number(run.checked)} / ${number(run.total)}`}</span></div><div className={`search-track ${retrieving?'indeterminate':''}`} role="progressbar" aria-label="تقدم البحث" aria-valuemin={0} aria-valuemax={100} aria-valuenow={retrieving?undefined:Math.round(searchProgress)}><i style={retrieving?undefined:{width:`${searchProgress}%`}}/></div></div>}{busy&&!cards.length?<div className="evidence-skeletons" aria-hidden="true">{[0,1,2].map(i=><div className="evidence-skeleton" key={i}><div><i/><span/></div><b/><b/><b/></div>)}</div>:cards.length?cards.slice(0,showCandidates?k:30).map(h=>evidenceCard(h)):<div className="evidence-empty"><div className="evidence-mark"><BookOpen size={37}/><span><Sparkles size={15}/></span></div><h3>{view==='saved'?'لا أدلة محفوظة':busy?'جارٍ البحث…':run?.error_message?'تعذر البحث':run?.cancelled?'توقف البحث':run?(run.hits.length&&!visibleHits.length?'لا أدلة في هذا التصنيف':run.hits.length?'لا نتائج مقبولة':'لا مقاطع فوق عتبة التشابه'):'الأدلة هنا'}</h3><p>{view==='saved'?'احفظ دليلاً للرجوع إليه.':busy?'تظهر النتائج تباعاً.':run?(run.hits.length&&!visibleHits.length?'اختر تصنيفاً آخر لعرض أدلته.':run.hits.length?'راجع المرشحات أو عدّل البحث.':'جرّب صياغة العبارة بصورة أوضح.'):'تظهر النصوص المرتبطة بالحوار هنا.'}</p></div>}
@@ -213,7 +253,7 @@ function App(){
     </div>
    </section>
   </div>}
-  {contextMain&&<div className="overlay context-overlay" onClick={()=>setContextMain('')}><section className="modal context-modal" role="dialog" aria-modal="true" aria-label="النص الأصلي والسياق" onClick={e=>e.stopPropagation()}><div className="modal-heading"><div><h2>النص الأصلي والسياق</h2></div><button className="icon-button" aria-label="إغلاق السياق" onClick={()=>setContextMain('')}><X size={20}/></button></div>{contextLoading?<div className="loading-context"><LoaderCircle className="spin"/> جارٍ إحضار النص…</div>:context&&<><div className="context-actions">{contextTarget&&<button className={`secondary save-evidence ${saved.has(contextTarget.hit.id)?'saved':''}`} onClick={()=>void bookmark(contextTarget.hit,contextTarget.owner,contextTarget.searchId)}><Bookmark size={16} fill={saved.has(contextTarget.hit.id)?'currentColor':'none'}/>{saved.has(contextTarget.hit.id)?'إلغاء حفظ الدليل':'حفظ الدليل'}</button>}{context.parents[contextMain]?.metadata.url&&/^https?:\/\//.test(context.parents[contextMain].metadata.url!)&&<a href={context.parents[contextMain].metadata.url} target="_blank" rel="noreferrer">المصدر على الويب <ArrowUpRight size={14}/></a>}</div><div className="context-body">{Object.values(context.parents).map((p:Parent)=><article className={p.id===contextMain?'main-parent':''} key={p.id}><span className="context-source">{health?.sources[p.source]||p.source} · {p.id===contextMain?'النص الكامل':'سياق مرتبط'}</span><h3>{p.title}</h3>{p.metadata.requires_source_review&&<div className="review-note">راجع الملف الأصلي للتحقق من المواضع التي تحتاج إلى مراجعة.</div>}<p>{p.text}</p></article>)}<div className="context-navigation">{context.links.filter(l=>l.load_on_expansion&&l.from===contextMain&&!['quran','tafsir-mujahid'].includes(context.parents[contextMain]?.source)).slice(0,4).map(l=><button key={l.to} onClick={()=>void openContext(l.to)}>{l.relation==='previous_section'?'الموضع السابق':l.relation==='next_section'?'الموضع التالي':'الآية المجاورة'} <ChevronLeft size={14}/></button>)}</div></div></>}</section></div>}
+  {contextMain&&<div className="overlay context-overlay" onClick={()=>setContextMain('')}><section className="modal context-modal" role="dialog" aria-modal="true" aria-label="النص الأصلي والسياق" onClick={e=>e.stopPropagation()}><div className="modal-heading"><div><h2>النص الأصلي والسياق</h2></div><button className="icon-button" aria-label="إغلاق السياق" onClick={()=>setContextMain('')}><X size={20}/></button></div>{contextLoading?<div className="loading-context"><LoaderCircle className="spin"/> جارٍ إحضار النص…</div>:context&&(()=>{const mainRange=(contextMain&&context.parents[contextMain])?findHighlightRange(context.parents[contextMain].text,contextTarget?.hit):null;return <><div className="context-actions">{contextTarget&&<button className={`secondary save-evidence ${saved.has(contextTarget.hit.id)?'saved':''}`} onClick={()=>void bookmark(contextTarget.hit,contextTarget.owner,contextTarget.searchId)}><Bookmark size={16} fill={saved.has(contextTarget.hit.id)?'currentColor':'none'}/>{saved.has(contextTarget.hit.id)?'إلغاء حفظ الدليل':'حفظ الدليل'}</button>}{mainRange&&<button className="secondary jump-highlight" onClick={()=>highlightRef.current?.scrollIntoView({behavior:'smooth',block:'center'})}><Highlighter size={14}/> الانتقال للشاهد المسترجع</button>}{context.parents[contextMain]?.metadata.url&&/^https?:\/\//.test(context.parents[contextMain].metadata.url!)&&<a href={context.parents[contextMain].metadata.url} target="_blank" rel="noreferrer">المصدر على الويب <ArrowUpRight size={14}/></a>}</div><div className="context-body">{Object.values(context.parents).map((p:Parent)=>{const range=p.id===contextMain?mainRange:null;return <article className={p.id===contextMain?'main-parent':''} key={p.id}><span className="context-source">{health?.sources[p.source]||p.source} · {p.id===contextMain?'النص الكامل':'سياق مرتبط'}</span><h3>{p.title}</h3>{p.metadata.requires_source_review&&<div className="review-note">راجع الملف الأصلي للتحقق من المواضع التي تحتاج إلى مراجعة.</div>}<p>{range?highlightSlice(p.text,range,highlightRef):p.text}</p></article>;})}<div className="context-navigation">{context.links.filter(l=>l.load_on_expansion&&l.from===contextMain&&!['quran','tafsir-mujahid'].includes(context.parents[contextMain]?.source)).slice(0,4).map(l=><button key={l.to} onClick={()=>void openContext(l.to)}>{l.relation==='previous_section'?'الموضع السابق':l.relation==='next_section'?'الموضع التالي':'الآية المجاورة'} <ChevronLeft size={14}/></button>)}</div></div></>;})()}</section></div>}
  </div>;
 }
 export default App;

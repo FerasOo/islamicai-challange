@@ -30,7 +30,7 @@ retrieval = Retrieval()
 cloud = None
 speaker_service = LocalSpeakerService()
 provider_semaphore = asyncio.Semaphore(80)
-ALLOWED_ORIGINS = {'http://127.0.0.1:5173','http://localhost:5173','http://127.0.0.1:8765','http://localhost:8765'}
+ALLOWED_ORIGINS = {'http://127.0.0.1:5173','http://localhost:5173','http://127.0.0.1:8765','http://localhost:8765','https://vowed-trustless-reason.ngrok-free.dev'}
 ALLOWED_ORIGINS.update(o.strip().rstrip('/') for o in os.getenv('DALEEL_ALLOWED_ORIGINS','').split(',') if o.strip())
 
 
@@ -235,16 +235,19 @@ async def live(ws:WebSocket,sid:str):
     send_lock = asyncio.Lock()
     reference = storage.voice_sample(sid)
     reference_revision = 0
-    settings = {'auto':True,'mode':'all','sources':[],'clip_seconds':5}
+    settings = {'auto':True,'mode':'all','sources':[],'clip_seconds':5,'evidence_pinned':False}
     history = storage.detail(sid)['events']
+    settings['evidence_pinned'] = next((bool(e['pinned']) for e in reversed(history)
+        if e['type']=='evidence_pin'),False)
     turns = [dict(e) for e in history if e['type']=='turn']
     for event in history:
         if event['type']=='turn_edited':
             for turn in turns:
                 if turn['id']==event['id']:turn['text']=event['text']
     turns = turns[-10:]
-    completed = {e['search_id'] for e in history if e['type']=='search_done' and e.get('accepted',0)>0}
-    topics = [e['query'] for e in history if e['type']=='search_started' and e['search_id'] in completed][-15:]
+    # An attempted search already covers that conversation topic for auto-triggering,
+    # even when it is still running or returns no accepted evidence.
+    topics = [e['query'] for e in history if e['type']=='search_started']
     segmenter = Segmenter(max_seconds=settings['clip_seconds'],pause_seconds=float('inf'))
     enrolling = False;enroll_parts = [];rate = 48000; audio_active = False
     enrollment_target = None
@@ -271,14 +274,8 @@ async def live(ws:WebSocket,sid:str):
 
     async def guarded_search(query):
         search_id = str(uuid.uuid4())
-        completed_run = {}
-        async def search_emit(event,persist=True):
-            if event['type']=='search_done':completed_run.update(event)
-            await emit(event,persist)
         try:
-            await run_search(sid,query,search_emit,search_id)
-            if completed_run.get('accepted',0)>0:
-                topics.append(query.text);del topics[:-15]
+            await run_search(sid,query,emit,search_id)
         except asyncio.CancelledError:
             await emit({'type':'search_cancelled','search_id':search_id})
             raise
@@ -292,13 +289,17 @@ async def live(ws:WebSocket,sid:str):
             search_task.cancel()
             await asyncio.gather(search_task,return_exceptions=True)
         query = Query(text=text,sources=settings['sources'])
+        topics.append(query.text)
         search_task = asyncio.create_task(guarded_search(query))
 
     async def automatic(turn):
         try:
             recent = [dict(t) for t in turns if settings['mode']!='enrolled' or t['speaker']=='enrolled' or t['id']==turn['id']][-10:]
-            decision = await cloud.trigger(recent,topics[-15:].copy())
-            scores = decision['answers'];run = scores['needs_evidence'] >= TRIGGER_MINIMUM and scores['new_need'] >= TRIGGER_MINIMUM
+            decision = await cloud.trigger(recent,topics.copy())
+            scores = decision['answers']
+            run = (scores['needs_evidence'] >= TRIGGER_MINIMUM
+                and scores['new_need'] >= TRIGGER_MINIMUM
+                and scores['reply_to_searched_topic'] < TRIGGER_MINIMUM)
             await emit({'type':'trigger','turn_id':turn['id'],'run':run,'scores':scores,'ms':decision['ms']})
             if run:
                 await start_search(turn['text'][-2000:])
@@ -313,7 +314,7 @@ async def live(ws:WebSocket,sid:str):
         turn = {'type':'turn','id':str(uuid.uuid4()),'text':text.strip(),'speaker':speaker,'label':label,**(extra or {})}
         turns.append(turn);del turns[:-10]
         await emit(turn)
-        if settings['auto'] and trigger_allowed:
+        if settings['auto'] and not settings['evidence_pinned'] and trigger_allowed:
             if trigger_task and not trigger_task.done():trigger_task.cancel()
             trigger_task = asyncio.create_task(automatic(turn))
 
@@ -423,7 +424,8 @@ async def live(ws:WebSocket,sid:str):
 
     try:
         await emit({'type':'connected','enrolled':enrollment is not None if using_live else reference is not None,'stt_mode':STT_TRANSPORT,
-            'voice_method':METHOD if using_live else 'gemini-reference-prefix','voice_profile':storage.selected_profile(sid)},persist=False)
+            'voice_method':METHOD if using_live else 'gemini-reference-prefix','voice_profile':storage.selected_profile(sid),
+            'evidence_pinned':settings['evidence_pinned']},persist=False)
         if using_live and reference and enrollment is None:
             await emit({'type':'notice','message':'أعد تسجيل عينة صوتك لتفعيل المطابقة المحلية.'},persist=False)
         while True:
@@ -473,6 +475,15 @@ async def live(ws:WebSocket,sid:str):
                     settings['clip_seconds'] = clip_seconds
                     if using_live and mode=='enrolled':
                         await emit({'type':'transcript_partial','text':''},persist=False)
+                elif kind=='evidence_pin':
+                    pinned=data.get('pinned')
+                    if not isinstance(pinned,bool):raise ValueError('حالة تثبيت الأدلة غير صالحة.')
+                    if pinned and not any(e['type']=='search_started' for e in storage.detail(sid)['events']):
+                        raise ValueError('ابحث عن أدلة أولاً قبل تثبيتها.')
+                    settings['evidence_pinned']=pinned
+                    if pinned and trigger_task and not trigger_task.done():
+                        trigger_task.cancel()
+                    await emit({'type':'evidence_pin','pinned':pinned})
                 elif kind=='select_profile':
                     if audio_active or enrolling:raise ValueError('أوقف التسجيل قبل تغيير الملف الصوتي.')
                     pid=data.get('profile_id');profile=storage.profile(pid)
@@ -582,7 +593,8 @@ async def live(ws:WebSocket,sid:str):
                     if using_live:
                         if live_client and audio_active:await live_client.flush()
                     elif not enrolling:await enqueue(segmenter.flush())
-                elif kind=='search':await start_search(Query(text=data.get('text','')).text)
+                elif kind=='search':
+                    await start_search(Query(text=data.get('text','')).text)
                 elif kind=='turn':
                     text = Query(text=data.get('text','')).text
                     speaker = data.get('speaker','enrolled')
