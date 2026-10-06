@@ -1,5 +1,5 @@
 import {useEffect,useRef,useState} from 'react';
-import {BookOpen,Bookmark,Check,ChevronDown,ChevronLeft,Clock,Copy,Download,FileText,Headphones,History,Layers,Library,LoaderCircle,Mic,MoreHorizontal,Plus,Search,Send,Settings2,ShieldCheck,Sparkles,Square,Trash2,UserRound,Users,Volume2,X,ArrowUpRight,Radio,PenLine} from 'lucide-react';
+import {BookOpen,Bookmark,Check,ChevronDown,ChevronLeft,Clock,Copy,Download,FileText,Headphones,History,Library,LoaderCircle,Mic,MoreHorizontal,Plus,Search,Send,Settings2,ShieldCheck,Sparkles,Square,Trash2,UserRound,Users,Volume2,X,ArrowUpRight,Radio,PenLine} from 'lucide-react';
 import {AudioCapture} from './audio';
 import {orderedEvidence} from './evidence';
 import {sessionSnapshot} from './history';
@@ -7,7 +7,8 @@ import type {Context,Health,Hit,Parent,Run,Session,Turn,VoiceProfile} from './ty
 
 const number=(n:number)=>new Intl.NumberFormat('ar-SA').format(n);
 const time=(n?:number)=>n===undefined?'—':n<1000?`${number(Math.round(n))} مللي ثانية`:`${number(Math.round(n/100)/10)} ثانية`;
-const sourceGroups=[{id:'all',name:'الكل',icon:Layers,sources:[]},{id:'quran',name:'القرآن',icon:BookOpen,sources:['quran','tafsir-mujahid']},{id:'hadith',name:'السنة',icon:FileText,sources:['bukhari','muslim','hadeethenc']},{id:'books',name:'الكتب',icon:Library,sources:['ibn-baz','ibn-uthaymeen','kuwait-fiqh']},{id:'terminology',name:'المصطلحات',icon:BookOpen,sources:['terminology']}];
+const sourceGroups=[{id:'quran',name:'القرآن',icon:BookOpen,sources:['quran','tafsir-mujahid']},{id:'hadith',name:'السنة',icon:FileText,sources:['bukhari','muslim','hadeethenc']},{id:'fatwa',name:'الفتاوى',icon:FileText,sources:['ibn-baz','ibn-uthaymeen']},{id:'books',name:'الكتب',icon:Library,sources:['kuwait-fiqh']},{id:'terminology',name:'المصطلحات',icon:BookOpen,sources:['terminology']}];
+const evidenceCount=(hits:Hit[],sources:string[])=>orderedEvidence(hits.filter(h=>h.status==='accepted'&&sources.includes(h.source))).length;
 async function api<T>(path:string,options?:RequestInit):Promise<T>{
  const response=await fetch('/api'+path,{...options,headers:{'Content-Type':'application/json',...options?.headers}});
  if(!response.ok){let message='تعذر إكمال الطلب.';try{const data=await response.json();if(typeof data.detail==='string')message=data.detail;}catch{}throw new Error(message);}
@@ -19,11 +20,11 @@ function App(){
  const [connected,setConnected]=useState(false);const [turns,setTurns]=useState<Turn[]>([]);const [runs,setRuns]=useState<Record<string,Run>>({});const [runOrder,setRunOrder]=useState<string[]>([]);const [selected,setSelected]=useState('');
  const [saved,setSaved]=useState<Set<string>>(new Set());const [savedHits,setSavedHits]=useState<Hit[]>([]);const [enrolled,setEnrolled]=useState(false);
  const [view,setView]=useState<'live'|'history'|'library'|'saved'>('live');const [settingsOpen,setSettingsOpen]=useState(false);const [voiceOpen,setVoiceOpen]=useState(false);
- const auto=true;const [mode,setMode]=useState<'all'|'enrolled'>('all');const [sourceGroup,setSourceGroup]=useState('all');const k=health?.retrieval_policy.candidate_limit??200;
+ const auto=true;const [mode,setMode]=useState<'all'|'enrolled'>('all');const [sourceGroup,setSourceGroup]=useState('quran');const k=health?.retrieval_policy.candidate_limit??200;
  const [profiles,setProfiles]=useState<VoiceProfile[]>([]);const [profileId,setProfileId]=useState('');const [profileName,setProfileName]=useState('');const [editingProfile,setEditingProfile]=useState('');const [profileEditor,setProfileEditor]=useState(false);
  const [voiceDraftMode,setVoiceDraftMode]=useState<'all'|'enrolled'>('all');const [voiceDraftProfileId,setVoiceDraftProfileId]=useState('');const [voiceApplying,setVoiceApplying]=useState(false);
  const [historyDetail,setHistoryDetail]=useState<{session:Session;turns:Turn[];runs:Run[]}>();const [historyLoading,setHistoryLoading]=useState(false);
- const [historyRunId,setHistoryRunId]=useState('');const [historySourceGroup,setHistorySourceGroup]=useState('all');const [historyShowCandidates,setHistoryShowCandidates]=useState(false);
+ const [historyRunId,setHistoryRunId]=useState('');const [historySourceGroup,setHistorySourceGroup]=useState('quran');const [historyShowCandidates,setHistoryShowCandidates]=useState(false);
  const [contextTarget,setContextTarget]=useState<{hit:Hit;owner:string;searchId?:string}>();
  const [notice,setNotice]=useState('');const [recording,setRecording]=useState(false);const [enrolling,setEnrolling]=useState(false);const [countdown,setCountdown]=useState(10);const [level,setLevel]=useState(0);const [audioState,setAudioState]=useState('stopped');
  const [partialTranscript,setPartialTranscript]=useState('');
@@ -37,7 +38,7 @@ function App(){
  const pendingVoiceProfile=useRef('');
  const ws=useRef<WebSocket|undefined>(undefined);const capture=useRef<AudioCapture|undefined>(undefined);const enrollmentTimer=useRef<ReturnType<typeof setInterval>|undefined>(undefined);const toastTimer=useRef<ReturnType<typeof setTimeout>|undefined>(undefined);const transcriptEnd=useRef<HTMLDivElement>(null);
  const settings=useRef({auto,mode,sources:[] as string[],clip_seconds:clipSeconds});
- settings.current={auto,mode,sources:sourceGroups.find(g=>g.id===sourceGroup)!.sources,clip_seconds:clipSeconds};
+ settings.current={auto,mode,sources:[],clip_seconds:clipSeconds};
  const notify=(text:string)=>{setNotice(text);clearTimeout(toastTimer.current);toastTimer.current=setTimeout(()=>setNotice(''),6500);};
  const send=(data:unknown)=>{if(ws.current?.readyState===WebSocket.OPEN)ws.current.send(JSON.stringify(data));else notify('الجلسة غير متصلة. انتظر إعادة الاتصال.');};
 
@@ -80,7 +81,7 @@ function App(){
   if(voiceDraftProfileId===profileId&&enrolled){setMode('enrolled');setVoiceOpen(false);return;}
   pendingVoiceProfile.current=voiceDraftProfileId;setVoiceApplying(true);ws.current.send(JSON.stringify({type:'select_profile',profile_id:voiceDraftProfileId}));
  }
- async function openSession(session:Session){setHistoryLoading(true);setHistoryDetail({session,turns:[],runs:[]});setHistorySourceGroup('all');setHistoryShowCandidates(false);try{const detail=await api<{events:any[]}>(`/sessions/${session.id}`);const snapshot=sessionSnapshot(detail.events);setHistoryRunId(snapshot.runs.at(-1)?.id||'');setHistoryDetail({session,...snapshot});}catch(e){notify((e as Error).message);setHistoryDetail(undefined);}finally{setHistoryLoading(false);}}
+ async function openSession(session:Session){setHistoryLoading(true);setHistoryDetail({session,turns:[],runs:[]});setHistorySourceGroup('quran');setHistoryShowCandidates(false);try{const detail=await api<{events:any[]}>(`/sessions/${session.id}`);const snapshot=sessionSnapshot(detail.events);setHistoryRunId(snapshot.runs.at(-1)?.id||'');setHistoryDetail({session,...snapshot});}catch(e){notify((e as Error).message);setHistoryDetail(undefined);}finally{setHistoryLoading(false);}}
  async function loadSessions(){const list=await api<Session[]>('/sessions');setSessions(list);return list;}
  async function newSession(){setSessionBusy(true);try{clearInterval(enrollmentTimer.current);await capture.current?.stop();setRecording(false);setEnrolling(false);const session=await api<Session>('/sessions',{method:'POST'});setSid(session.id);localStorage.setItem('daleel-session',session.id);await loadSessions();setView('live');}catch(e){notify((e as Error).message);}finally{setSessionBusy(false);}}
  useEffect(()=>{let alive=true;(async()=>{try{const h=await api<Health>('/health');if(!alive)return;setHealth(h);await loadProfiles();await loadSaved();const list=await loadSessions();if(!alive)return;const last=localStorage.getItem('daleel-session');if(last&&list.some(s=>s.id===last))setSid(last);else{const s=await api<Session>('/sessions',{method:'POST'});if(alive){setSid(s.id);localStorage.setItem('daleel-session',s.id);await loadSessions();}}}catch(e){if(alive)notify((e as Error).message);}})();return()=>{alive=false;};},[]);
@@ -95,7 +96,7 @@ function App(){
   }catch(e){if(!disposed){notify((e as Error).message);retry=setTimeout(()=>void connect(),3000);}}}
   void connect();return()=>{disposed=true;clearTimeout(retry);clearInterval(enrollmentTimer.current);void capture.current?.stop(true);socket?.close();};
  },[sid]);
- useEffect(()=>{if(connected)send({type:'settings',...settings.current});},[auto,mode,sourceGroup,connected,clipSeconds]);
+ useEffect(()=>{if(connected)send({type:'settings',...settings.current});},[auto,mode,connected,clipSeconds]);
  useEffect(()=>{transcriptEnd.current?.scrollIntoView({behavior:'smooth',block:'nearest'});},[turns.length,partialTranscript]);
  useEffect(()=>()=>{clearTimeout(toastTimer.current);clearInterval(enrollmentTimer.current);},[]);
 
@@ -113,12 +114,13 @@ function App(){
  const run=runs[selected];const busy=!!run&&!run.done;
  const retrieving=busy&&!run?.timing;const searchProgress=run?.total?Math.min(100,100*run.checked/run.total):0;
  const rawHits=view==='saved'?savedHits.map(h=>({...h,source_name:health?.sources[h.source]||h.source_name,status:'accepted' as const,reference:h.reference||'موضع محفوظ في المصدر',similarity:h.similarity||0})):run?.hits||[];
- const visibleHits=rawHits.filter(h=>health?.sources[h.source]&&(view==='saved'||sourceGroup==='all'||settings.current.sources.includes(h.source)));
+ const visibleSources=sourceGroups.find(g=>g.id===sourceGroup)?.sources||[];
+ const visibleHits=rawHits.filter(h=>health?.sources[h.source]&&(view==='saved'||visibleSources.includes(h.source)));
  const accepted=visibleHits.filter(h=>h.status==='accepted');const cards=orderedEvidence(showCandidates?visibleHits:accepted);
  const historyRun=historyDetail?.runs.find(r=>r.id===historyRunId)||historyDetail?.runs.at(-1);
  const historyLastTurn=historyDetail?.turns.at(-1);
  const historySources=sourceGroups.find(g=>g.id===historySourceGroup)?.sources||[];
- const historyHits=(historyRun?.hits||[]).filter(h=>health?.sources[h.source]&&(historySourceGroup==='all'||historySources.includes(h.source)));
+ const historyHits=(historyRun?.hits||[]).filter(h=>health?.sources[h.source]&&historySources.includes(h.source));
  const historyCards=orderedEvidence(historyShowCandidates?historyHits:historyHits.filter(h=>h.status==='accepted'));
  const evidenceSessions=sessions.filter(s=>s.has_search);
  const statusLabel=audioState==='connecting'?'يتصل بالتفريغ…':audioState==='processing'?'تفريغ العبارة…':recording?'يستمع الآن':'الميكروفون';
@@ -163,10 +165,10 @@ function App(){
 
     </section>}
     <section className="evidence panel"><div className="panel-heading"><div className="heading-label"><BookOpen size={18}/><h2>{view==='saved'?'المحفوظات':'الأدلة'}</h2><span className="count-badge">{number(cards.length)}</span></div><button className="icon-button" aria-label="ضبط البحث" onClick={()=>setSettingsOpen(true)}><Settings2 size={17}/></button></div>
-     {view!=='saved'&&<div className="source-tabs">{sourceGroups.map(g=><button key={g.id} className={sourceGroup===g.id?'active':''} onClick={()=>setSourceGroup(g.id)}><g.icon size={13}/>{g.name}</button>)}</div>}
-     {run&&view!=='saved'&&<div className="query-strip"><div><Search size={14}/><p>{run.query}</p></div><span>{busy?<><LoaderCircle size={12} className="spin"/> {retrieving?'إحضار النصوص…':`فحص ${number(run.checked)} / ${number(run.total)}`}</>:<><Check size={12}/> {run.error_message?'تعذر البحث':run.cancelled?'توقف البحث':'اكتمل البحث'}</>}</span>{busy&&<button aria-label="إيقاف البحث" onClick={()=>send({type:'cancel'})}><X size={13}/></button>}</div>}
-     <div className="evidence-scroll">{busy&&view!=='saved'&&<div className="search-progress" role="status" aria-live="polite"><div><span className="search-pulse"/><b>{retrieving?'إحضار الأدلة':'التحقق من الصلة'}</b><span>{!retrieving&&`${number(run.checked)} / ${number(run.total)}`}</span></div><div className={`search-track ${retrieving?'indeterminate':''}`} role="progressbar" aria-label="تقدم البحث" aria-valuemin={0} aria-valuemax={100} aria-valuenow={retrieving?undefined:Math.round(searchProgress)}><i style={retrieving?undefined:{width:`${searchProgress}%`}}/></div></div>}{busy&&!cards.length?<div className="evidence-skeletons" aria-hidden="true">{[0,1,2].map(i=><div className="evidence-skeleton" key={i}><div><i/><span/></div><b/><b/><b/></div>)}</div>:cards.length?cards.slice(0,showCandidates?k:30).map(h=>evidenceCard(h)):<div className="evidence-empty"><div className="evidence-mark"><BookOpen size={37}/><span><Sparkles size={15}/></span></div><h3>{view==='saved'?'لا أدلة محفوظة':busy?'جارٍ البحث…':run?.error_message?'تعذر البحث':run?.cancelled?'توقف البحث':run?(run.hits.length?'لا نتائج مقبولة':'لا مقاطع فوق عتبة التشابه'):'الأدلة هنا'}</h3><p>{view==='saved'?'احفظ دليلاً للرجوع إليه.':busy?'تظهر النتائج تباعاً.':run?(run.hits.length?'راجع المرشحات أو عدّل البحث.':'جرّب صياغة العبارة بصورة أوضح.'):'تظهر النصوص المرتبطة بالحوار هنا.'}</p></div>}
-     {run&&view!=='saved'&&<button className="candidate-toggle" onClick={()=>setShowCandidates(!showCandidates)}>{showCandidates?'الأدلة المقبولة':`المرشحات (${number(run.hits.length)})`}<ChevronDown size={15}/></button>}
+     {view!=='saved'&&<div className="source-tabs">{sourceGroups.map(g=><button key={g.id} className={sourceGroup===g.id?'active':''} aria-pressed={sourceGroup===g.id} onClick={()=>setSourceGroup(g.id)}><g.icon size={13}/>{g.name}<span className="source-count">{number(evidenceCount(run?.hits||[],g.sources))}</span></button>)}</div>}
+     {run&&view!=='saved'&&<div className="query-strip"><div><Search size={14}/><p>{run.query}</p></div><span>{busy?<><LoaderCircle size={12} className="spin"/> {retrieving?'إحضار النصوص…':`فحص ${number(run.checked)} / ${number(run.total)}`}</>:<>{run.error_message||run.cancelled?<X size={12}/>:<Check size={12}/>} {run.error_message?'تعذر البحث':run.cancelled?'توقف البحث':`اكتمل البحث · مرشحات ${number(run.hits.length)} / ${number(run.k)}`}</>}</span>{busy&&<button aria-label="إيقاف البحث" onClick={()=>send({type:'cancel'})}><X size={13}/></button>}</div>}
+     <div className="evidence-scroll">{busy&&view!=='saved'&&<div className="search-progress" role="status" aria-live="polite"><div><span className="search-pulse"/><b>{retrieving?'إحضار الأدلة':'التحقق من الصلة'}</b><span>{!retrieving&&`${number(run.checked)} / ${number(run.total)}`}</span></div><div className={`search-track ${retrieving?'indeterminate':''}`} role="progressbar" aria-label="تقدم البحث" aria-valuemin={0} aria-valuemax={100} aria-valuenow={retrieving?undefined:Math.round(searchProgress)}><i style={retrieving?undefined:{width:`${searchProgress}%`}}/></div></div>}{busy&&!cards.length?<div className="evidence-skeletons" aria-hidden="true">{[0,1,2].map(i=><div className="evidence-skeleton" key={i}><div><i/><span/></div><b/><b/><b/></div>)}</div>:cards.length?cards.slice(0,showCandidates?k:30).map(h=>evidenceCard(h)):<div className="evidence-empty"><div className="evidence-mark"><BookOpen size={37}/><span><Sparkles size={15}/></span></div><h3>{view==='saved'?'لا أدلة محفوظة':busy?'جارٍ البحث…':run?.error_message?'تعذر البحث':run?.cancelled?'توقف البحث':run?(run.hits.length&&!visibleHits.length?'لا أدلة في هذا التصنيف':run.hits.length?'لا نتائج مقبولة':'لا مقاطع فوق عتبة التشابه'):'الأدلة هنا'}</h3><p>{view==='saved'?'احفظ دليلاً للرجوع إليه.':busy?'تظهر النتائج تباعاً.':run?(run.hits.length&&!visibleHits.length?'اختر تصنيفاً آخر لعرض أدلته.':run.hits.length?'راجع المرشحات أو عدّل البحث.':'جرّب صياغة العبارة بصورة أوضح.'):'تظهر النصوص المرتبطة بالحوار هنا.'}</p></div>}
+     {run&&view!=='saved'&&<button className="candidate-toggle" onClick={()=>setShowCandidates(!showCandidates)}>{showCandidates?'الأدلة المقبولة':`المرشحات (${number(visibleHits.length)})`}<ChevronDown size={15}/></button>}
      {cards.length>(showCandidates?k:30)&&<p className="muted">تُعرض المقاطع الأولى مع دمج النتائج التي تشترك في المصدر والسياق.</p>}</div>
      
     </section>
@@ -201,7 +203,7 @@ function App(){
        </div>
       </aside>
       <section className="session-results panel"><div className="panel-heading"><div className="heading-label"><BookOpen size={18}/><h2>الأدلة</h2><span className="count-badge">{number(historyCards.length)}</span></div></div>
-       <div className="source-tabs">{sourceGroups.map(g=><button key={g.id} className={historySourceGroup===g.id?'active':''} onClick={()=>setHistorySourceGroup(g.id)}><g.icon size={13}/>{g.name}</button>)}</div>
+       <div className="source-tabs">{sourceGroups.map(g=><button key={g.id} className={historySourceGroup===g.id?'active':''} aria-pressed={historySourceGroup===g.id} onClick={()=>setHistorySourceGroup(g.id)}><g.icon size={13}/>{g.name}<span className="source-count">{number(evidenceCount(historyRun?.hits||[],g.sources))}</span></button>)}</div>
        {historyRun&&<div className="query-strip"><div><Search size={14}/><p>{historyRun.query}</p></div><span>{historyRun.cancelled?'توقف البحث':historyRun.error_message?'تعذر البحث':'بحث مكتمل'}</span></div>}
        <div className="session-results-scroll">{historyCards.length?historyCards.slice(0,historyShowCandidates?k:30).map(h=>evidenceCard(h,historyDetail.session.id,historyRun?.id)):<div className="evidence-empty"><div className="evidence-mark"><BookOpen size={34}/></div><h3>{historyRun?'لا أدلة في هذا التصنيف':'لا بحوث بعد'}</h3><p>{historyRun?'اختر مصدراً آخر أو اعرض المقاطع المرشحة.':'ستظهر أدلة الجلسة بعد أول بحث.'}</p></div>}
         {historyRun&&<button className="candidate-toggle" onClick={()=>setHistoryShowCandidates(!historyShowCandidates)}>{historyShowCandidates?'الأدلة المقبولة':`المرشحات (${number(historyHits.length)})`}<ChevronDown size={15}/></button>}
